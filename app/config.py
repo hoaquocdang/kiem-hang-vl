@@ -39,7 +39,13 @@ def _resolve_data_dir() -> Path:
 
 
 IS_VERCEL = bool(os.getenv("VERCEL"))
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+# Neon integration may use DATABASE_POSTGRES_URL instead of DATABASE_URL
+DATABASE_URL = (
+    os.getenv("DATABASE_URL", "")
+    or os.getenv("DATABASE_POSTGRES_URL", "")
+    or os.getenv("DATABASE_POSTGRES_URL_NON_POOLING", "")
+    or os.getenv("POSTGRES_URL", "")
+).strip()
 IS_CLOUD = bool(DATABASE_URL)
 # Allow mutations when a cloud database is configured (even on Vercel)
 MUTATIONS_DISABLED = IS_VERCEL and not IS_CLOUD
