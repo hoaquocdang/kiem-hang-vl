@@ -179,6 +179,10 @@ async def parse_inventory_stateless(file: UploadFile = File(...)) -> dict:
 
 @app.get("/health")
 def health() -> dict:
+    import os as _os
+    db_url = _os.getenv("DATABASE_URL", "")
+    db_pg_url = _os.getenv("DATABASE_POSTGRES_URL", "")
+    db_url_unpool = _os.getenv("DATABASE_URL_UNPOOLED", "")
     return {
         "status": "ok",
         "timestamp": utc_now(),
@@ -187,7 +191,12 @@ def health() -> dict:
             "data_dir": str(DATA_DIR),
             "users_data_dir": str(USERS_DATA_DIR),
             "is_vercel": IS_VERCEL,
+            "is_cloud": IS_CLOUD,
             "writes_enabled": not MUTATIONS_DISABLED,
+            "db_url_set": bool(db_url),
+            "db_pg_url_set": bool(db_pg_url),
+            "db_url_unpool_set": bool(db_url_unpool),
+            "db_url_prefix": db_url[:20] if db_url else "",
         },
     }
 
