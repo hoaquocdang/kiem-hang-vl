@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kiểm hàng barcode</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+
+    <!-- FOLDER PICKER SCREEN -->
+    <section id="folder-view" class="auth-shell hidden">
+      <article class="auth-card">
+        <div class="auth-brand">
+          <div class="folder-icon">📁</div>
+          <h1>Kết nối thư mục</h1>
+          <p id="folder-caption">Chọn thư mục trên máy tính để lưu dữ liệu kiểm hàng. Dữ liệu không lưu trên server.</p>
+        </div>
+        <button id="pick-folder-btn" class="btn btn-primary btn-primary-lg" type="button">Chọn thư mục</button>
+        <p id="folder-status" class="status-line" aria-live="polite"></p>
+      </article>
+    </section>
+
+    <!-- AUTH SCREEN -->
+    <section id="auth-view" class="auth-shell">
+      <article class="auth-card">
+        <div class="auth-brand">
+          <div class="auth-icon">📦</div>
+          <h1 id="auth-title">Đăng nhập</h1>
+          <p id="auth-caption">Dữ liệu kiểm hàng được lưu local theo từng tài khoản.</p>
+        </div>
+
+        <form id="login-form" class="auth-form">
+          <label>
+            Tên đăng nhập
+            <input type="text" name="username" autocomplete="username" required />
+          </label>
+          <label>
+            Mật khẩu
+            <input type="password" name="password" autocomplete="current-password" required />
+          </label>
+          <button class="btn btn-primary btn-primary-lg" type="submit">Đăng nhập</button>
+        </form>
+
+        <form id="setup-form" class="auth-form hidden">
+          <label>
+            Tên admin
+            <input type="text" name="username" autocomplete="username" value="admin" required />
+          </label>
+          <label>
+            Tên hiển thị
+            <input type="text" name="display_name" autocomplete="name" value="Admin" />
+          </label>
+          <label>
+            Mật khẩu admin
+            <input type="password" name="password" autocomplete="new-password" minlength="8" required />
+          </label>
+          <button class="btn btn-primary btn-primary-lg" type="submit">Tạo admin</button>
+        </form>
+
+        <p id="auth-status" class="status-line" aria-live="polite"></p>
+      </article>
+    </section>
+
+    <!-- APP SHELL -->
+    <main id="app-view" class="app-shell hidden">
+
+      <!-- TOPBAR -->
+      <header class="topbar">
+        <div class="topbar-brand">
+          <div class="topbar-logo">📦</div>
+          <span class="topbar-title">Kiểm hàng barcode</span>
+        </div>
+        <nav class="topbar-actions" aria-label="Tác vụ nhanh">
+          <span id="user-label" class="chip"></span>
+          <span id="folder-label" class="chip chip-folder hidden" title="Thư mục dữ liệu đang kết nối"></span>
+          <button id="admin-toggle" class="btn btn-ghost btn-sm hidden" type="button">Tài khoản</button>
+          <a class="btn btn-secondary btn-sm" href="/static/inventory-template.csv" download>Tải file mẫu</a>
+          <button id="export-button" class="btn btn-ghost btn-sm" type="button">Xuất báo cáo</button>
+          <button id="logout-button" class="btn btn-ghost btn-sm" type="button">Đăng xuất</button>
+        </nav>
+      </header>
+
+      <!-- ADMIN PANEL -->
+      <section id="admin-panel" class="card admin-panel hidden">
+        <div class="section-header">
+          <h2 class="section-title">Quản lý tài khoản</h2>
+        </div>
+        <p class="section-sub">Admin tạo tài khoản user. Tài khoản admin chỉ dùng trên máy chủ quản lý.</p>
+        <p id="account-sheet-path" class="sheet-path-text"></p>
+
+        <div class="divider"></div>
+
+        <form id="create-user-form" class="form-row form-row-4">
+          <label>
+            Tên đăng nhập
+            <input type="text" name="username" autocomplete="off" required />
+          </label>
+          <label>
+            Tên hiển thị
+            <input type="text" name="display_name" autocomplete="off" />
+          </label>
+          <label>
+            Mật khẩu
+            <input type="password" name="password" autocomplete="new-password" minlength="8" required />
+          </label>
+          <button class="btn btn-primary" type="submit">Tạo tài khoản</button>
+        </form>
+
+        <p id="admin-status" class="status-line" aria-live="polite"></p>
+        <div id="user-list" class="user-list"></div>
+      </section>
+
+      <!-- STEP 1 & 2 -->
+      <section class="workflow-grid">
+
+        <article class="card card-accent-blue">
+          <div class="section-header">
+            <span class="step-pill">Bước 1</span>
+            <h2 class="section-title">Import tồn kho</h2>
+          </div>
+          <p class="section-sub">Hỗ trợ file <strong>.xlsx</strong>, <strong>.xlsm</strong> và <strong>.csv</strong>.</p>
+          <div class="divider"></div>
+          <form id="import-form" class="form-stack">
+            <label>
+              Tên phiên kiểm hàng
+              <input type="text" name="session_name" value="Kiểm hàng ca ngày" />
+            </label>
+            <label>
+              File tồn kho
+              <input type="file" name="file" accept=".xlsx,.xlsm,.csv" required />
+            </label>
+            <button class="btn btn-primary" type="submit">Import dữ liệu</button>
+          </form>
+          <p id="import-status" class="status-line" aria-live="polite"></p>
+        </article>
+
+        <article class="card scan-card card-accent-blue">
+          <div class="section-header">
+            <span class="step-pill">Bước 2</span>
+            <h2 class="section-title">Quét barcode</h2>
+          </div>
+          <p class="section-sub">Mỗi mã quét được ghi nhận ngay và đối chiếu với tồn kho hiện tại.</p>
+          <div class="divider"></div>
+          <form id="scan-form" class="form-stack">
+            <label>
+              Mã scan
+              <input id="barcode-input" type="text" name="barcode" autocomplete="off" inputmode="text" />
+            </label>
+          </form>
+          <p id="scan-status" class="status-line" aria-live="polite"></p>
+        </article>
+
+      </section>
+
+      <!-- STATS ROW -->
+      <div class="stats-row" id="stats-grid" aria-label="Tổng quan kiểm hàng"></div>
+
+      <!-- SESSION & DISCREPANCY -->
+      <section class="workspace-grid">
+
+        <article class="card">
+          <div class="section-header">
+            <h2 class="section-title">Phiên hiện tại</h2>
+          </div>
+          <p id="session-meta" class="session-meta-text">Chưa có dữ liệu.</p>
+          <div class="divider"></div>
+          <div class="checkpoint-row">
+            <button id="preview-button" class="btn btn-ghost" type="button">Tạm chốt</button>
+            <button id="finalize-button" class="btn btn-primary" type="button">Chốt phiên</button>
+          </div>
+          <div id="recent-scans" class="stack"></div>
+          <div id="recent-pagination" class="pagination-row hidden">
+            <button id="recent-prev" class="btn btn-ghost btn-sm" type="button">Trang trước</button>
+            <button id="recent-next" class="btn btn-ghost btn-sm" type="button">Trang sau</button>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="section-header">
+            <h2 class="section-title">Chênh lệch cần xử lý</h2>
+          </div>
+          <p id="discrepancy-caption" class="section-sub">Trong lúc scan chỉ hiển thị tổng thiếu và tổng dư. Bấm Tạm chốt hoặc Chốt phiên để xem chi tiết.</p>
+          <div class="divider"></div>
+          <div id="discrepancy-summary" class="summary-box"></div>
+          <div id="discrepancy-list" class="stack"></div>
+        </article>
+
+      </section>
+
+      <!-- DETAIL TABLE -->
+      <section class="table-card">
+        <div class="table-card-header">
+          <div class="table-header-top">
+            <div class="section-header" style="margin-bottom:4px;">
+              <h2 class="section-title">Bảng đối chiếu chi tiết</h2>
+            </div>
+            <div class="search-row" style="margin-top:0;">
+              <div class="search-input-wrap">
+                <span class="search-icon">🔍</span>
+                <input id="search-input" class="search-field" type="search" placeholder="Tìm theo tên hàng, màu, size, tác nghiệp..." autocomplete="off" />
+                <button id="search-clear" class="search-clear-btn hidden" type="button" aria-label="Xóa tìm kiếm">&times;</button>
+              </div>
+              <span id="search-count" class="search-count hidden"></span>
+            </div>
+          </div>
+          <p class="section-sub">Theo dõi sản phẩm, màu, size, tác nghiệp, tồn kho, số đã scan và trạng thái khớp lệch.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="col-stt">#</th>
+                <th>Sản phẩm</th>
+                <th>Tác nghiệp</th>
+                <th>Mã màu</th>
+                <th>Tên màu</th>
+                <th>Chất liệu</th>
+                <th>Kiểu dáng</th>
+                <th>Size</th>
+                <th>Tồn đầu</th>
+                <th>Đã scan</th>
+                <th>Còn lại</th>
+                <th>Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody id="items-body">
+              <tr>
+                <td colspan="12" class="empty-cell">Import file tồn kho để bắt đầu.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="items-pagination" class="table-pagination hidden">
+          <span id="items-page-info" class="pagination-info"></span>
+          <div class="pagination-btns">
+            <button id="items-first" class="btn btn-ghost btn-sm" type="button">Đầu</button>
+            <button id="items-prev" class="btn btn-ghost btn-sm" type="button">Trước</button>
+            <button id="items-next" class="btn btn-ghost btn-sm" type="button">Sau</button>
+            <button id="items-last" class="btn btn-ghost btn-sm" type="button">Cuối</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <footer class="app-footer">
+      <span>Liên hệ hỗ trợ: <a href="https://kgen.cloud/info" target="_blank" rel="noopener">Admin Hoaqd</a></span>
+      <span>Phát triển bởi <a href="https://kgen.cloud" target="_blank" rel="noopener">Kgen.Cloud</a></span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

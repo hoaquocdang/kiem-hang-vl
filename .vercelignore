@@ -1,0 +1,10 @@
+.build-venv
+build
+dist
+data
+__pycache__
+app/__pycache__
+*.pyc
+*.spec
+server.*.log
+test-*.xlsx

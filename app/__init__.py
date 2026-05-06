@@ -1,0 +1,1 @@
+"""Stock audit application package."""
