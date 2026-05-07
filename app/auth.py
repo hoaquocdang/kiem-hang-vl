@@ -7,6 +7,8 @@ import io
 import platform
 import re
 import secrets
+import time
+import threading
 from datetime import datetime, timedelta
 from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
@@ -43,6 +45,9 @@ ACCOUNT_SHEET_HEADERS = [
 ]
 ADMIN_OWNER_MACHINE_KEY = "admin_owner_machine_id"
 REMOTE_SHEET_SYNC_TIMEOUT_SECONDS = 6
+SYNC_THROTTLE_SECONDS = 30
+_sync_throttle_lock = threading.Lock()
+_last_sync_at: float = 0.0
 
 
 def auth_now() -> str:
@@ -626,7 +631,20 @@ def export_users_to_sheet(connection, raise_on_error: bool = True) -> None:
         ) from exc
 
 
+def sync_users_from_sheet_if_needed(connection) -> None:
+    """Throttled wrapper — runs at most once every SYNC_THROTTLE_SECONDS per process."""
+    global _last_sync_at
+    now = time.monotonic()
+    with _sync_throttle_lock:
+        if now - _last_sync_at < SYNC_THROTTLE_SECONDS:
+            return
+        _last_sync_at = now
+    sync_users_from_sheet(connection)
+
+
 def sync_users_from_sheet(connection) -> None:
+    global _last_sync_at
+    _last_sync_at = time.monotonic()
     remote_url = _account_sheet_url()
     if remote_url:
         try:
