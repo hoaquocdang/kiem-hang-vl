@@ -28,7 +28,9 @@ from app.auth import (
     get_user_by_id,
     get_authenticated_user,
     get_session_token,
+    list_login_audit,
     list_users,
+    record_user_login,
     reset_user_password,
     serialize_user,
     set_admin_owner_machine,
@@ -74,6 +76,16 @@ async def add_private_network_access_header(request: Request, call_next):
     if request.headers.get("origin"):
         response.headers["Access-Control-Allow-Private-Network"] = "true"
     return response
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else ""
 
 
 if STATIC_DIR.exists():
@@ -222,7 +234,6 @@ def _clear_session_response(payload: dict) -> JSONResponse:
 def _current_user(request: Request) -> dict:
     _ensure_local_runtime()
     with connection_scope() as connection:
-        sync_users_from_sheet(connection)
         cleanup_expired_sessions(connection)
         user = get_authenticated_user(connection, request)
     if not user:
@@ -247,9 +258,11 @@ def auth_status(request: Request) -> dict:
         }
 
     with connection_scope() as connection:
-        sync_users_from_sheet(connection)
         cleanup_expired_sessions(connection)
         has_users = users_exist(connection)
+        if not has_users:
+            sync_users_from_sheet(connection)
+            has_users = users_exist(connection)
         setup_required = not has_users and admin_setup_allowed()
         setup_locked = not has_users and not setup_required
         user = get_authenticated_user(connection, request)
@@ -292,12 +305,20 @@ def setup_admin(payload: SetupPayload, request: Request) -> JSONResponse:
             allow_admin_role=True,
         )
         set_admin_owner_machine(connection)
+        record_user_login(
+            connection,
+            user["id"],
+            _client_ip(request),
+            request.headers.get("user-agent", ""),
+        )
         export_users_to_sheet(connection)
         migrate_legacy_stock_data(connection, user["id"])
+        user = get_user_by_id(connection, user["id"]) or user
         token = create_auth_session(
             connection,
             user["id"],
             request.headers.get("user-agent", ""),
+            _client_ip(request),
         )
     return _session_response(
         {
@@ -313,13 +334,20 @@ def login(payload: LoginPayload, request: Request) -> JSONResponse:
     _ensure_local_runtime()
     with connection_scope() as connection:
         sync_users_from_sheet(connection)
-        user = authenticate_user(connection, payload.username, payload.password)
+        user = authenticate_user(
+            connection,
+            payload.username,
+            payload.password,
+            _client_ip(request),
+            request.headers.get("user-agent", ""),
+        )
         if not user:
             raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
         token = create_auth_session(
             connection,
             user["id"],
             request.headers.get("user-agent", ""),
+            _client_ip(request),
         )
     return _session_response(
         {
@@ -339,11 +367,24 @@ def logout(request: Request) -> JSONResponse:
     return _clear_session_response({"message": "Đã đăng xuất"})
 
 
-def _serialize_admin_user(user: dict) -> dict:
+def _empty_login_audit() -> dict:
+    return {
+        "active_ips": [],
+        "active_ip_count": 0,
+        "last_session_ip": "",
+        "last_session_user_agent": "",
+        "last_session_at": "",
+    }
+
+
+def _serialize_admin_user(user: dict, login_audit: dict | None = None) -> dict:
     return serialize_user(user) | {
         "is_active": bool(user["is_active"]),
         "created_at": user.get("created_at") or "",
         "last_login_at": user.get("last_login_at") or "",
+        "last_login_ip": user.get("last_login_ip") or "",
+        "last_login_user_agent": user.get("last_login_user_agent") or "",
+        "login_audit": login_audit or _empty_login_audit(),
         "data_path": str(user_database_path(user["id"])),
     }
 
@@ -353,9 +394,13 @@ def get_users(_: dict = Depends(_current_admin)) -> dict:
     with connection_scope() as connection:
         sync_users_from_sheet(connection)
         users = list_users(connection)
+        login_audit = list_login_audit(connection)
     return {
         "account_sheet_path": str(ACCOUNT_SHEET_PATH),
-        "users": [_serialize_admin_user(user) for user in users],
+        "users": [
+            _serialize_admin_user(user, login_audit.get(user["id"]))
+            for user in users
+        ],
     }
 
 
@@ -707,8 +752,9 @@ def scan_barcode(payload: ScanPayload, user: dict = Depends(_current_user)) -> d
 
         if not item:
             note = (
-                f"Không khớp file tồn theo màu {parsed['color_code']}, "
-                f"size {parsed['size_code']}, tác nghiệp {parsed['operation_key']}"
+                f"CẢNH BÁO: Mã scan không có trong file tồn đã import. "
+                f"Kiểm tra lại hàng hoặc mã vạch: màu {parsed['color_code']}, "
+                f"size {parsed['size_code']}, tác nghiệp {parsed['operation_key']}."
             )
             connection.execute(
                 """
@@ -733,6 +779,7 @@ def scan_barcode(payload: ScanPayload, user: dict = Depends(_current_user)) -> d
             dashboard = _build_dashboard(connection, session["id"])
             return {
                 "matched": False,
+                "severity": "wrong_item",
                 "message": note,
                 "scan_parts": parsed,
                 "session": session,

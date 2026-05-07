@@ -14,15 +14,19 @@ SPLIT_DATABASE_MIGRATION_KEY = "split_user_databases_v1"
 
 # ===== SQLITE HELPERS (local mode) =====
 
+class StockAuditConnection(sqlite3.Connection):
+    current_user_id: int | None
+
+
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
     return {column[0]: row[index] for index, column in enumerate(cursor.description)}
 
 
 def get_connection(database_path: Path = DATABASE_PATH) -> sqlite3.Connection:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(database_path, factory=StockAuditConnection)
     connection.row_factory = _dict_factory
-    connection.current_user_id = None  # type: ignore[attr-defined]
+    connection.current_user_id = None
     return connection
 
 
@@ -122,7 +126,9 @@ CREATE TABLE IF NOT EXISTS app_users (
     role TEXT NOT NULL DEFAULT 'user',
     is_active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
-    last_login_at TEXT
+    last_login_at TEXT,
+    last_login_ip TEXT,
+    last_login_user_agent TEXT
 );
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token TEXT PRIMARY KEY,
@@ -130,14 +136,19 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     user_agent TEXT,
+    ip_address TEXT,
     FOREIGN KEY(user_id) REFERENCES app_users(id)
 );
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS last_login_ip TEXT;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS last_login_user_agent TEXT;
+ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS ip_address TEXT;
 CREATE TABLE IF NOT EXISTS app_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_ip ON auth_sessions(user_id, ip_address, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_app_users_role_active ON app_users(role, is_active);
 CREATE TABLE IF NOT EXISTS stock_sessions (
     id BIGSERIAL PRIMARY KEY,
@@ -227,7 +238,9 @@ def _init_auth_db(connection: sqlite3.Connection) -> None:
             role TEXT NOT NULL DEFAULT 'user',
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
-            last_login_at TEXT
+            last_login_at TEXT,
+            last_login_ip TEXT,
+            last_login_user_agent TEXT
         )
         """
     )
@@ -239,10 +252,12 @@ def _init_auth_db(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             user_agent TEXT,
+            ip_address TEXT,
             FOREIGN KEY(user_id) REFERENCES app_users(id)
         )
         """
     )
+    _ensure_auth_columns(connection)
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS app_meta (
@@ -256,8 +271,32 @@ def _init_auth_db(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at)"
     )
     connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_ip ON auth_sessions(user_id, ip_address, created_at DESC)"
+    )
+    connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_app_users_role_active ON app_users(role, is_active)"
     )
+
+
+def _ensure_auth_columns(connection: sqlite3.Connection) -> None:
+    app_user_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(app_users)").fetchall()
+    }
+    app_user_additions = {
+        "last_login_ip": "TEXT",
+        "last_login_user_agent": "TEXT",
+    }
+    for column_name, definition in app_user_additions.items():
+        if column_name not in app_user_columns:
+            connection.execute(f"ALTER TABLE app_users ADD COLUMN {column_name} {definition}")
+
+    session_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()
+    }
+    if "ip_address" not in session_columns:
+        connection.execute("ALTER TABLE auth_sessions ADD COLUMN ip_address TEXT")
 
 
 def init_data_db(connection: sqlite3.Connection) -> None:
