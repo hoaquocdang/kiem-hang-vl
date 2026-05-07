@@ -11,6 +11,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+import threading
+
 from app import assets
 from app.auth import (
     SESSION_COOKIE_NAME,
@@ -36,10 +38,11 @@ from app.auth import (
     set_admin_owner_machine,
     set_user_active,
     sync_users_from_sheet,
+    sync_users_from_sheet_if_needed,
     users_exist,
 )
 from app.config import ACCOUNT_SHEET_PATH, DATA_DIR, IS_CLOUD, IS_VERCEL, MUTATIONS_DISABLED, PUBLIC_DIR, STATIC_DIR
-from app.sheets import enrich_item
+from app.sheets import enrich_item, prefetch_sheets
 from app.db import (
     USERS_DATA_DIR,
     connection_scope,
@@ -172,6 +175,7 @@ def startup() -> None:
             ).fetchone()
             if admin:
                 migrate_legacy_stock_data(connection, admin["id"])
+    threading.Thread(target=prefetch_sheets, daemon=True).start()
 
 
 @app.get("/", response_model=None)
@@ -234,6 +238,7 @@ def _clear_session_response(payload: dict) -> JSONResponse:
 def _current_user(request: Request) -> dict:
     _ensure_local_runtime()
     with connection_scope() as connection:
+        sync_users_from_sheet_if_needed(connection)
         cleanup_expired_sessions(connection)
         user = get_authenticated_user(connection, request)
     if not user:
@@ -258,6 +263,7 @@ def auth_status(request: Request) -> dict:
         }
 
     with connection_scope() as connection:
+        sync_users_from_sheet_if_needed(connection)
         cleanup_expired_sessions(connection)
         has_users = users_exist(connection)
         if not has_users:
@@ -504,6 +510,30 @@ def _get_active_session(connection) -> dict | None:
     ).fetchone()
 
 
+_ITEM_SELECT_COLUMNS = """
+    id,
+    variant_key,
+    COALESCE(product_name, '') AS product_name,
+    COALESCE(operation_label, '') AS operation_label,
+    COALESCE(operation_code, '') AS operation_code,
+    COALESCE(operation_key, '') AS operation_key,
+    COALESCE(price, '') AS price,
+    COALESCE(color, '') AS color,
+    COALESCE(size, '') AS size,
+    COALESCE(source_note, '') AS source_note,
+    COALESCE(color_name, '') AS color_name,
+    COALESCE(material, '') AS material,
+    COALESCE(style, '') AS style,
+    COALESCE(form, '') AS form,
+    COALESCE(attributes, '') AS attributes,
+    stock_qty,
+    scanned_qty,
+    COALESCE(reason_code, '') AS reason_code,
+    COALESCE(reason_note, '') AS reason_note,
+    COALESCE(last_scanned_at, '') AS last_scanned_at
+"""
+
+
 def _build_item_snapshot(row: dict) -> dict:
     difference = row["scanned_qty"] - row["stock_qty"]
     remaining_qty = row["stock_qty"] - row["scanned_qty"]
@@ -512,29 +542,41 @@ def _build_item_snapshot(row: dict) -> dict:
         status = "over"
     elif difference < 0:
         status = "short"
-    enriched = enrich_item(dict(row))
-    return {**row, **enriched, "difference": difference, "remaining_qty": remaining_qty, "status": status}
+    return {**dict(row), "difference": difference, "remaining_qty": remaining_qty, "status": status}
+
+
+def _build_summary(connection, session_id: int) -> dict:
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS total_lines,
+            COALESCE(SUM(stock_qty), 0) AS total_stock,
+            COALESCE(SUM(scanned_qty), 0) AS total_scanned,
+            COALESCE(SUM(CASE WHEN scanned_qty = stock_qty THEN 1 ELSE 0 END), 0) AS matched_lines,
+            COALESCE(SUM(CASE WHEN scanned_qty > stock_qty THEN 1 ELSE 0 END), 0) AS over_lines,
+            COALESCE(SUM(CASE WHEN scanned_qty < stock_qty THEN 1 ELSE 0 END), 0) AS short_lines
+        FROM inventory_items
+        WHERE session_id = ?
+        """,
+        (session_id,),
+    ).fetchone() or {}
+    total_stock = int(row.get("total_stock") or 0)
+    total_scanned = int(row.get("total_scanned") or 0)
+    return {
+        "total_lines": int(row.get("total_lines") or 0),
+        "total_stock": total_stock,
+        "total_scanned": total_scanned,
+        "matched_lines": int(row.get("matched_lines") or 0),
+        "over_lines": int(row.get("over_lines") or 0),
+        "short_lines": int(row.get("short_lines") or 0),
+        "difference_total": total_scanned - total_stock,
+    }
 
 
 def _build_dashboard(connection, session_id: int) -> dict:
     rows = connection.execute(
-        """
-        SELECT
-            id,
-            variant_key,
-            COALESCE(product_name, '') AS product_name,
-            COALESCE(operation_label, '') AS operation_label,
-            COALESCE(operation_code, '') AS operation_code,
-            COALESCE(operation_key, '') AS operation_key,
-            COALESCE(price, '') AS price,
-            COALESCE(color, '') AS color,
-            COALESCE(size, '') AS size,
-            COALESCE(source_note, '') AS source_note,
-            stock_qty,
-            scanned_qty,
-            COALESCE(reason_code, '') AS reason_code,
-            COALESCE(reason_note, '') AS reason_note,
-            COALESCE(last_scanned_at, '') AS last_scanned_at
+        f"""
+        SELECT {_ITEM_SELECT_COLUMNS}
         FROM inventory_items
         WHERE session_id = ?
             ORDER BY color, size, operation_code
@@ -634,6 +676,13 @@ async def import_inventory(
 ) -> dict:
     _ensure_mutations_allowed()
     items = await parse_inventory_file(file)
+    for item in items:
+        enriched = enrich_item(dict(item))
+        item["color_name"] = enriched.get("color_name", "") or ""
+        item["material"] = enriched.get("material", "") or ""
+        item["style"] = enriched.get("style", "") or ""
+        item["form"] = enriched.get("form", "") or ""
+        item["attributes"] = enriched.get("attributes", "") or ""
     imported_at = utc_now()
     normalized_name = session_name.strip() or "Phiên kiểm hàng mới"
 
@@ -680,9 +729,14 @@ async def import_inventory(
                 color,
                 size,
                 source_note,
+                color_name,
+                material,
+                style,
+                form,
+                attributes,
                 stock_qty,
                 scanned_qty
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             """,
             [
                 (
@@ -698,6 +752,11 @@ async def import_inventory(
                     item["color"],
                     item["size"],
                     item.get("source_note", ""),
+                    item.get("color_name", ""),
+                    item.get("material", ""),
+                    item.get("style", ""),
+                    item.get("form", ""),
+                    item.get("attributes", ""),
                     item["stock_qty"],
                 )
                 for item in items
@@ -719,7 +778,11 @@ async def import_inventory(
 
 @app.post("/api/scan")
 @app.post("/scan")
-def scan_barcode(payload: ScanPayload, user: dict = Depends(_current_user)) -> dict:
+def scan_barcode(
+    payload: ScanPayload,
+    compact: bool = Query(default=False),
+    user: dict = Depends(_current_user),
+) -> dict:
     _ensure_mutations_allowed()
     now = utc_now()
     parsed = parse_scan_code(payload.barcode)
@@ -731,7 +794,7 @@ def scan_barcode(payload: ScanPayload, user: dict = Depends(_current_user)) -> d
 
         item = connection.execute(
             """
-            SELECT *
+            SELECT id
             FROM inventory_items
             WHERE session_id = ?
               AND color = ?
@@ -776,6 +839,28 @@ def scan_barcode(payload: ScanPayload, user: dict = Depends(_current_user)) -> d
                     now,
                 ),
             )
+            scan_event = {
+                "scan_code": parsed["raw_code"],
+                "color_code": parsed["color_code"],
+                "size_code": parsed["size_code"],
+                "operation_code": parsed["operation_code"],
+                "operation_key": parsed["operation_key"],
+                "quantity": payload.quantity,
+                "status": "unmatched",
+                "note": note,
+                "created_at": now,
+            }
+            if compact:
+                summary = _build_summary(connection, session["id"])
+                return {
+                    "matched": False,
+                    "message": note,
+                    "scan_parts": parsed,
+                    "session": session,
+                    "summary": summary,
+                    "scan_event": scan_event,
+                    "compact": True,
+                }
             dashboard = _build_dashboard(connection, session["id"])
             return {
                 "matched": False,
@@ -816,31 +901,48 @@ def scan_barcode(payload: ScanPayload, user: dict = Depends(_current_user)) -> d
         )
 
         refreshed_item = connection.execute(
-            """
-            SELECT
-                id,
-                variant_key,
-                COALESCE(product_name, '') AS product_name,
-                COALESCE(operation_label, '') AS operation_label,
-                COALESCE(operation_code, '') AS operation_code,
-                COALESCE(operation_key, '') AS operation_key,
-                COALESCE(price, '') AS price,
-                COALESCE(color, '') AS color,
-                COALESCE(size, '') AS size,
-                COALESCE(source_note, '') AS source_note,
-                stock_qty,
-                scanned_qty,
-                COALESCE(reason_code, '') AS reason_code,
-                COALESCE(reason_note, '') AS reason_note,
-                COALESCE(last_scanned_at, '') AS last_scanned_at
-            FROM inventory_items
-            WHERE id = ?
-            """,
+            f"SELECT {_ITEM_SELECT_COLUMNS} FROM inventory_items WHERE id = ?",
             (item["id"],),
         ).fetchone()
+        snapshot = _build_item_snapshot(refreshed_item)
+
+        if compact:
+            summary = _build_summary(connection, session["id"])
+            scan_event = {
+                "scan_code": parsed["raw_code"],
+                "color_code": parsed["color_code"],
+                "size_code": parsed["size_code"],
+                "operation_code": parsed["operation_code"],
+                "operation_key": parsed["operation_key"],
+                "quantity": payload.quantity,
+                "status": "matched",
+                "note": "",
+                "created_at": now,
+            }
+            color_desc = snapshot.get("color_name", "") or snapshot["color"]
+            material_desc = snapshot.get("material", "")
+            extra_info = (
+                f" ({color_desc}{' - ' + material_desc if material_desc else ''})"
+                if snapshot.get("color_name") or material_desc
+                else ""
+            )
+            return {
+                "matched": True,
+                "message": (
+                    f"Đã ghi nhận {payload.quantity} cho màu {snapshot['color']}{extra_info} | "
+                    f"size {snapshot['size']} | tác nghiệp {snapshot['operation_key'] or snapshot['operation_label']} | "
+                    f"còn lại {snapshot['remaining_qty']}"
+                ),
+                "item": snapshot,
+                "scan_parts": parsed,
+                "session": session,
+                "summary": summary,
+                "scan_event": scan_event,
+                "compact": True,
+            }
+
         dashboard = _build_dashboard(connection, session["id"])
 
-    snapshot = _build_item_snapshot(refreshed_item)
     color_desc = snapshot.get("color_name", "") or snapshot["color"]
     material_desc = snapshot.get("material", "")
     extra_info = f" ({color_desc}{' - ' + material_desc if material_desc else ''})" if snapshot.get("color_name") or material_desc else ""

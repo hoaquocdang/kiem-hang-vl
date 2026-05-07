@@ -26,7 +26,14 @@ def get_connection(database_path: Path = DATABASE_PATH) -> sqlite3.Connection:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database_path, factory=StockAuditConnection)
     connection.row_factory = _dict_factory
-    connection.current_user_id = None
+    connection.current_user_id = None  # type: ignore[attr-defined]
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA temp_store=MEMORY")
+        connection.execute("PRAGMA cache_size=-20000")
+    except sqlite3.DatabaseError:
+        pass
     return connection
 
 
@@ -176,9 +183,19 @@ CREATE TABLE IF NOT EXISTS inventory_items (
     reason_code TEXT,
     reason_note TEXT,
     source_note TEXT,
+    color_name TEXT NOT NULL DEFAULT '',
+    material TEXT NOT NULL DEFAULT '',
+    style TEXT NOT NULL DEFAULT '',
+    form TEXT NOT NULL DEFAULT '',
+    attributes TEXT NOT NULL DEFAULT '',
     last_scanned_at TEXT,
     FOREIGN KEY(session_id) REFERENCES stock_sessions(id)
 );
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS color_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS material TEXT NOT NULL DEFAULT '';
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS style TEXT NOT NULL DEFAULT '';
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS form TEXT NOT NULL DEFAULT '';
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS attributes TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS scan_events (
     id BIGSERIAL PRIMARY KEY,
     session_id BIGINT NOT NULL,
@@ -197,8 +214,9 @@ CREATE TABLE IF NOT EXISTS scan_events (
     FOREIGN KEY(item_id) REFERENCES inventory_items(id)
 );
 CREATE INDEX IF NOT EXISTS idx_items_session ON inventory_items(session_id);
-CREATE INDEX IF NOT EXISTS idx_items_variant ON inventory_items(session_id, color, size, operation_code);
-CREATE INDEX IF NOT EXISTS idx_events_session ON scan_events(session_id, created_at DESC);
+DROP INDEX IF EXISTS idx_items_variant;
+CREATE INDEX IF NOT EXISTS idx_items_lookup ON inventory_items(session_id, color, operation_key, size);
+CREATE INDEX IF NOT EXISTS idx_events_session ON scan_events(session_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_active ON stock_sessions(is_active, id DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON stock_sessions(user_id, is_active, id DESC);
 """
@@ -331,6 +349,11 @@ def init_data_db(connection: sqlite3.Connection) -> None:
             reason_code TEXT,
             reason_note TEXT,
             source_note TEXT,
+            color_name TEXT NOT NULL DEFAULT '',
+            material TEXT NOT NULL DEFAULT '',
+            style TEXT NOT NULL DEFAULT '',
+            form TEXT NOT NULL DEFAULT '',
+            attributes TEXT NOT NULL DEFAULT '',
             last_scanned_at TEXT,
             FOREIGN KEY(session_id) REFERENCES stock_sessions(id)
         )
@@ -361,11 +384,12 @@ def init_data_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_items_session ON inventory_items(session_id)"
     )
+    connection.execute("DROP INDEX IF EXISTS idx_items_variant")
     connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_items_variant ON inventory_items(session_id, color, size, operation_code)"
+        "CREATE INDEX IF NOT EXISTS idx_items_lookup ON inventory_items(session_id, color, operation_key, size)"
     )
     connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_events_session ON scan_events(session_id, created_at DESC)"
+        "CREATE INDEX IF NOT EXISTS idx_events_session ON scan_events(session_id, id DESC)"
     )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_active ON stock_sessions(is_active, id DESC)"
@@ -386,6 +410,11 @@ def _ensure_data_columns(connection: sqlite3.Connection) -> None:
         "operation_key": "TEXT",
         "price": "TEXT",
         "source_note": "TEXT",
+        "color_name": "TEXT NOT NULL DEFAULT ''",
+        "material": "TEXT NOT NULL DEFAULT ''",
+        "style": "TEXT NOT NULL DEFAULT ''",
+        "form": "TEXT NOT NULL DEFAULT ''",
+        "attributes": "TEXT NOT NULL DEFAULT ''",
     }
     for column_name, definition in inventory_additions.items():
         if column_name not in existing_inventory_columns:

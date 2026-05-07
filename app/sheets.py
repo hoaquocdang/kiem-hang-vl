@@ -4,14 +4,20 @@ import csv
 import re
 import time
 from io import StringIO
+from urllib.error import URLError
 from urllib.request import urlopen
 
 GOOGLE_SHEET_ID = "1i8EWIOKZDQq9wL7I3uYXMrX-gCED6mJfU7nWbCsT8IA"
 COLOR_SHEET_GID = "209884490"
 TKCT_SHEET_GID = "2128017473"
 CACHE_TTL = 3600
+NETWORK_TIMEOUT = 5
+NEGATIVE_CACHE_TTL = 60
 
 _cache: dict[str, tuple[float, list[dict]]] = {}
+_color_map_cache: tuple[float, dict[int, list[dict]]] | None = None
+_product_map_cache: tuple[float, dict[int, list[dict]]] | None = None
+_negative_cache: dict[str, float] = {}
 
 
 def _sheet_csv_url(gid: str) -> str:
@@ -29,12 +35,30 @@ def fetch_sheet_csv(gid: str) -> list[dict]:
     if cached and (now - cached[0]) < CACHE_TTL:
         return cached[1]
 
+    last_failure = _negative_cache.get(gid)
+    if last_failure and (now - last_failure) < NEGATIVE_CACHE_TTL:
+        return cached[1] if cached else []
+
     url = _sheet_csv_url(gid)
-    with urlopen(url, timeout=15) as response:
-        raw = response.read().decode("utf-8-sig")
+    try:
+        with urlopen(url, timeout=NETWORK_TIMEOUT) as response:
+            raw = response.read().decode("utf-8-sig")
+    except (OSError, URLError, TimeoutError):
+        _negative_cache[gid] = now
+        return cached[1] if cached else []
     rows = _parse_csv(raw)
     _cache[gid] = (now, rows)
+    _negative_cache.pop(gid, None)
     return rows
+
+
+def prefetch_sheets() -> None:
+    """Best-effort warm-up. Safe to call from a background thread."""
+    try:
+        get_color_map()
+        get_product_map()
+    except Exception:
+        pass
 
 
 def _normalize(text: str) -> str:
@@ -51,6 +75,10 @@ def _token_overlap(query: str, target: str) -> int:
 
 def get_color_map() -> dict[int, list[dict]]:
     """Build a color-code → list-of-rows map (one color may have multiple products)."""
+    global _color_map_cache
+    now = time.time()
+    if _color_map_cache and (now - _color_map_cache[0]) < CACHE_TTL:
+        return _color_map_cache[1]
     rows = fetch_sheet_csv(COLOR_SHEET_GID)
     result: dict[int, list[dict]] = {}
     for row in rows:
@@ -71,11 +99,16 @@ def get_color_map() -> dict[int, list[dict]]:
             "product_name": (row.get("TÊN HÀNG") or "").strip(),
         }
         result.setdefault(code, []).append(entry)
+    _color_map_cache = (now, result)
     return result
 
 
 def get_product_map() -> dict[int, list[dict]]:
     """Build a color-code → list-of-rows map from the TKCT sheet."""
+    global _product_map_cache
+    now = time.time()
+    if _product_map_cache and (now - _product_map_cache[0]) < CACHE_TTL:
+        return _product_map_cache[1]
     rows = fetch_sheet_csv(TKCT_SHEET_GID)
     result: dict[int, list[dict]] = {}
     for row in rows:
@@ -91,6 +124,7 @@ def get_product_map() -> dict[int, list[dict]]:
             "material": (row.get("Chất liệu") or "").strip(),
         }
         result.setdefault(code, []).append(entry)
+    _product_map_cache = (now, result)
     return result
 
 
