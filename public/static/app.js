@@ -58,6 +58,7 @@ let storageMode = null; // "local" | "bridge" | "fs"
 let fsData = null;      // in-memory data for FS mode
 let dirHandle = null;   // FileSystemDirectoryHandle
 let searchQuery = "";
+let lastDashboard = null;
 
 const RECENT_SCAN_PAGE_SIZE = 5;
 const ITEMS_PAGE_SIZE = 20;
@@ -1058,11 +1059,43 @@ function renderSession(session) {
 }
 
 function renderDashboard(data) {
+  lastDashboard = data;
   renderSession(data.session || null);
   renderStats(data.summary || null);
   renderItems(data.items || [], searchQuery);
   renderDiscrepancies(data.discrepancies || []);
   renderUnmatched(data.recent_scans || [], searchQuery);
+}
+
+function applyScanPatch(data) {
+  if (!lastDashboard) return false;
+  if (data.session) lastDashboard.session = data.session;
+  if (data.summary) lastDashboard.summary = data.summary;
+
+  if (data.matched && data.item) {
+    const items = lastDashboard.items || [];
+    const idx = items.findIndex(i => i.id === data.item.id);
+    if (idx >= 0) items[idx] = data.item;
+    else items.push(data.item);
+    lastDashboard.items = items;
+    lastDashboard.discrepancies = items.filter(i => (i.difference || 0) !== 0 || i.reason_code);
+  }
+
+  if (data.scan_event) {
+    const recent = [data.scan_event, ...(lastDashboard.recent_scans || [])].slice(0, 20);
+    lastDashboard.recent_scans = recent;
+    if (data.scan_event.status === "unmatched") {
+      const unmatched = [data.scan_event, ...(lastDashboard.unmatched_scans || [])].slice(0, 20);
+      lastDashboard.unmatched_scans = unmatched;
+    }
+  }
+
+  renderSession(lastDashboard.session || null);
+  renderStats(lastDashboard.summary || null);
+  renderItems(lastDashboard.items || [], searchQuery);
+  renderDiscrepancies(lastDashboard.discrepancies || []);
+  renderUnmatched(lastDashboard.recent_scans || [], searchQuery);
+  return true;
 }
 
 async function loadCurrentSession() {
@@ -1443,12 +1476,16 @@ async function submitScan(barcode) {
 
   setStatus(scanStatus, "Đang ghi nhận scan...");
   try {
-    const response = await apiFetch("/api/scan", { method: "POST", body: JSON.stringify({ barcode, quantity: 1 }) });
+    const response = await apiFetch("/api/scan?compact=1", { method: "POST", body: JSON.stringify({ barcode, quantity: 1 }) });
     const data = await readResponsePayload(response);
     if (!response.ok) throw new Error(data.detail || "Không ghi nhận được scan");
     discrepancyMode = "compact";
     setStatus(scanStatus, data.message, data.matched ? "success" : "error");
-    renderDashboard(data);
+    if (data.compact && lastDashboard) {
+      applyScanPatch(data);
+    } else {
+      renderDashboard(data);
+    }
     barcodeInput.value = "";
     barcodeInput.focus();
     return true;
