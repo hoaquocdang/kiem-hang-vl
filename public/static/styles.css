@@ -297,6 +297,36 @@ p {
   margin-bottom: 18px;
 }
 
+.admin-module {
+  border-color: rgba(0, 113, 227, 0.2);
+}
+
+.admin-module-header {
+  align-items: flex-start;
+}
+
+.module-kicker {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--blue);
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.admin-only-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: var(--pill);
+  color: var(--blue);
+  background: var(--blue-soft);
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .section-header {
   display: flex;
   align-items: center;
@@ -674,6 +704,11 @@ textarea {
   opacity: 0.58;
 }
 
+.user-risk {
+  border-color: rgba(215, 0, 21, 0.34);
+  background: linear-gradient(180deg, rgba(255, 69, 58, 0.08), rgba(255, 255, 255, 0.72));
+}
+
 .user-main strong,
 .user-name {
   color: var(--text);
@@ -685,6 +720,35 @@ textarea {
 .user-meta {
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.user-audit {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+}
+
+.user-audit-line {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.audit-warning {
+  color: var(--red) !important;
+  font-weight: 700;
+}
+
+.risk-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-left: 6px;
+  padding: 0 8px;
+  border-radius: var(--pill);
+  color: var(--red);
+  background: var(--red-soft);
+  font-size: 0.74rem;
+  font-weight: 800;
 }
 
 .user-actions {

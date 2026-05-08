@@ -74,19 +74,24 @@
         <nav class="topbar-actions" aria-label="Tác vụ nhanh">
           <span id="user-label" class="chip"></span>
           <span id="folder-label" class="chip chip-folder hidden" title="Thư mục dữ liệu đang kết nối"></span>
-          <button id="admin-toggle" class="btn btn-ghost btn-sm hidden" type="button">Tài khoản</button>
+          <button id="change-folder-button" class="btn btn-ghost btn-sm hidden" type="button">Đổi thư mục</button>
+          <button id="admin-toggle" class="btn btn-ghost btn-sm hidden" type="button" aria-expanded="false">Quản lý user</button>
           <a class="btn btn-secondary btn-sm" href="/static/inventory-template.csv" download>Tải file mẫu</a>
           <button id="export-button" class="btn btn-ghost btn-sm" type="button">Xuất báo cáo</button>
           <button id="logout-button" class="btn btn-ghost btn-sm" type="button">Đăng xuất</button>
         </nav>
       </header>
 
-      <!-- ADMIN PANEL -->
-      <section id="admin-panel" class="card admin-panel hidden">
-        <div class="section-header">
-          <h2 class="section-title">Quản lý tài khoản</h2>
+      <!-- ADMIN MODULE -->
+      <section id="admin-panel" class="card admin-panel admin-module hidden">
+        <div class="section-header admin-module-header">
+          <div>
+            <span class="module-kicker">Module admin</span>
+            <h2 class="section-title">Quản lý user</h2>
+          </div>
+          <span class="admin-only-badge">Chỉ admin</span>
         </div>
-        <p class="section-sub">Admin tạo tài khoản user. Tài khoản admin chỉ dùng trên máy chủ quản lý.</p>
+        <p class="section-sub">Admin tạo user, reset mật khẩu, khóa/mở khóa tài khoản và kiểm tra IP/thiết bị đang dùng account.</p>
         <p id="account-sheet-path" class="sheet-path-text"></p>
 
         <div class="divider"></div>
@@ -182,6 +187,7 @@
           </div>
           <p id="discrepancy-caption" class="section-sub">Trong lúc scan chỉ hiển thị tổng thiếu và tổng dư. Bấm Tạm chốt hoặc Chốt phiên để xem chi tiết.</p>
           <div class="divider"></div>
+          <div id="excess-alert" class="excess-alert hidden" role="status"></div>
           <div id="discrepancy-summary" class="summary-box"></div>
           <div id="discrepancy-list" class="stack"></div>
         </article>

@@ -42,6 +42,8 @@ ACCOUNT_SHEET_HEADERS = [
     "password_hash",
     "created_at",
     "last_login_at",
+    "last_login_ip",
+    "last_login_user_agent",
 ]
 ADMIN_OWNER_MACHINE_KEY = "admin_owner_machine_id"
 REMOTE_SHEET_SYNC_TIMEOUT_SECONDS = 6
@@ -168,6 +170,14 @@ def serialize_user(user: dict) -> dict:
     }
 
 
+def _trim_ip(value: str) -> str:
+    return (value or "").strip()[:64]
+
+
+def _trim_user_agent(value: str) -> str:
+    return (value or "").strip()[:255]
+
+
 def users_exist(connection) -> bool:
     row = connection.execute("SELECT 1 FROM app_users LIMIT 1").fetchone()
     return row is not None
@@ -211,7 +221,16 @@ def create_user(
 
     return connection.execute(
         """
-        SELECT id, username, display_name, role, is_active, created_at, last_login_at
+        SELECT
+            id,
+            username,
+            display_name,
+            role,
+            is_active,
+            created_at,
+            last_login_at,
+            COALESCE(last_login_ip, '') AS last_login_ip,
+            COALESCE(last_login_user_agent, '') AS last_login_user_agent
         FROM app_users
         WHERE id = ?
         """,
@@ -222,7 +241,17 @@ def create_user(
 def list_users(connection) -> list[dict]:
     return connection.execute(
         """
-        SELECT id, username, display_name, password_hash, role, is_active, created_at, last_login_at
+        SELECT
+            id,
+            username,
+            display_name,
+            password_hash,
+            role,
+            is_active,
+            created_at,
+            last_login_at,
+            COALESCE(last_login_ip, '') AS last_login_ip,
+            COALESCE(last_login_user_agent, '') AS last_login_user_agent
         FROM app_users
         ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, username
         """
@@ -232,7 +261,16 @@ def list_users(connection) -> list[dict]:
 def get_user_by_id(connection, user_id: int) -> dict | None:
     return connection.execute(
         """
-        SELECT id, username, display_name, role, is_active, created_at, last_login_at
+        SELECT
+            id,
+            username,
+            display_name,
+            role,
+            is_active,
+            created_at,
+            last_login_at,
+            COALESCE(last_login_ip, '') AS last_login_ip,
+            COALESCE(last_login_user_agent, '') AS last_login_user_agent
         FROM app_users
         WHERE id = ?
         """,
@@ -303,7 +341,31 @@ def delete_user_sessions(connection, user_id: int) -> None:
     connection.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
 
 
-def authenticate_user(connection, username: str, password: str) -> dict | None:
+def record_user_login(
+    connection,
+    user_id: int,
+    ip_address: str = "",
+    user_agent: str = "",
+) -> None:
+    connection.execute(
+        """
+        UPDATE app_users
+        SET last_login_at = ?,
+            last_login_ip = ?,
+            last_login_user_agent = ?
+        WHERE id = ?
+        """,
+        (auth_now(), _trim_ip(ip_address), _trim_user_agent(user_agent), user_id),
+    )
+
+
+def authenticate_user(
+    connection,
+    username: str,
+    password: str,
+    ip_address: str = "",
+    user_agent: str = "",
+) -> dict | None:
     user = connection.execute(
         """
         SELECT id, username, display_name, password_hash, role, is_active
@@ -317,26 +379,67 @@ def authenticate_user(connection, username: str, password: str) -> dict | None:
         return None
     if not verify_password(password, user["password_hash"]):
         return None
-    connection.execute(
-        "UPDATE app_users SET last_login_at = ? WHERE id = ?",
-        (auth_now(), user["id"]),
-    )
+    record_user_login(connection, user["id"], ip_address, user_agent)
     return user
 
 
-def create_auth_session(connection, user_id: int, user_agent: str = "") -> str:
+def create_auth_session(
+    connection,
+    user_id: int,
+    user_agent: str = "",
+    ip_address: str = "",
+) -> str:
     token = secrets.token_urlsafe(32)
     expires_at = (datetime.utcnow() + timedelta(seconds=SESSION_MAX_AGE_SECONDS)).isoformat(
         timespec="seconds"
     )
     connection.execute(
         """
-        INSERT INTO auth_sessions(token, user_id, created_at, expires_at, user_agent)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO auth_sessions(token, user_id, created_at, expires_at, user_agent, ip_address)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (token, user_id, auth_now(), expires_at, user_agent[:255]),
+        (token, user_id, auth_now(), expires_at, _trim_user_agent(user_agent), _trim_ip(ip_address)),
     )
     return token
+
+
+def list_login_audit(connection) -> dict[int, dict]:
+    rows = connection.execute(
+        """
+        SELECT
+            user_id,
+            COALESCE(ip_address, '') AS ip_address,
+            COALESCE(user_agent, '') AS user_agent,
+            created_at
+        FROM auth_sessions
+        WHERE expires_at > ?
+        ORDER BY created_at DESC
+        """,
+        (auth_now(),),
+    ).fetchall()
+    audits: dict[int, dict] = {}
+    for row in rows:
+        user_id = int(row["user_id"])
+        audit = audits.setdefault(
+            user_id,
+            {
+                "active_ips": [],
+                "active_ip_count": 0,
+                "last_session_ip": "",
+                "last_session_user_agent": "",
+                "last_session_at": "",
+            },
+        )
+        ip_address = row.get("ip_address") or ""
+        if not audit["last_session_at"]:
+            audit["last_session_at"] = row.get("created_at") or ""
+            audit["last_session_ip"] = ip_address
+            audit["last_session_user_agent"] = row.get("user_agent") or ""
+        if ip_address and ip_address not in audit["active_ips"]:
+            audit["active_ips"].append(ip_address)
+    for audit in audits.values():
+        audit["active_ip_count"] = len(audit["active_ips"])
+    return audits
 
 
 def get_session_token(request: Request) -> str:
@@ -605,6 +708,8 @@ def export_users_to_sheet(connection, raise_on_error: bool = True) -> None:
                 user.get("password_hash") or "",
                 user.get("created_at") or "",
                 user.get("last_login_at") or "",
+                user.get("last_login_ip") or "",
+                user.get("last_login_user_agent") or "",
             ]
         )
 
@@ -652,7 +757,7 @@ def sync_users_from_sheet(connection) -> None:
             changed, should_export = _apply_account_rows(
                 connection,
                 rows,
-                allow_admin_roles=False,
+                allow_admin_roles=IS_CLOUD,
             )
             if changed or should_export or not ACCOUNT_SHEET_PATH.exists():
                 export_users_to_sheet(connection, raise_on_error=False)

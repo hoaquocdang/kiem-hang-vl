@@ -4,6 +4,7 @@ const folderCaption = document.getElementById("folder-caption");
 const folderStatus = document.getElementById("folder-status");
 const pickFolderBtn = document.getElementById("pick-folder-btn");
 const folderLabel = document.getElementById("folder-label");
+const changeFolderButton = document.getElementById("change-folder-button");
 const authView = document.getElementById("auth-view");
 const appView = document.getElementById("app-view");
 const authTitle = document.getElementById("auth-title");
@@ -57,10 +58,12 @@ let storageMode = null; // "local" | "bridge" | "fs"
 let fsData = null;      // in-memory data for FS mode
 let dirHandle = null;   // FileSystemDirectoryHandle
 let searchQuery = "";
+let lastDashboard = null;
 
 const RECENT_SCAN_PAGE_SIZE = 5;
 const ITEMS_PAGE_SIZE = 20;
 const LOCAL_BRIDGE_URL = "http://127.0.0.1:8020";
+const BRIDGE_DETECTION_TIMEOUT_MS = 2500;
 const IS_REMOTE_FRONTEND = !["127.0.0.1", "localhost", ""].includes(window.location.hostname);
 const USE_LOCAL_BRIDGE = IS_REMOTE_FRONTEND && new URLSearchParams(window.location.search).get("bridge") === "1";
 const AUTH_TOKEN_KEY = "stockAuditLocalSessionToken";
@@ -68,7 +71,7 @@ const FS_USER_KEY = "stockAuditFSUser";
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1iGzRcG2j7JdWlOyWrmGmTxRwLw9v3S813_6y_fCUsfM/export?format=csv&gid=0";
 
 let authToken = window.localStorage.getItem(AUTH_TOKEN_KEY) || "";
-let API_BASE = IS_REMOTE_FRONTEND ? LOCAL_BRIDGE_URL : "";
+let API_BASE = "";
 
 const reasonOptions = [
   "Chưa có lý do",
@@ -96,6 +99,12 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function shortenUserAgent(value) {
+  const text = String(value || "").trim();
+  if (!text) return "Chưa ghi nhận";
+  return text.length > 86 ? `${text.slice(0, 83)}...` : text;
+}
+
 function numberFormat(value) {
   return new Intl.NumberFormat("vi-VN").format(value || 0);
 }
@@ -112,10 +121,13 @@ function statusLabel(status) {
 
 function getErrorMessage(error) {
   if (error instanceof TypeError) {
-    if (storageMode === "cloud" || storageMode === "local") {
-      return "Không kết nối được server. Hãy kiểm tra kết nối mạng.";
+    if (storageMode === "bridge" || USE_LOCAL_BRIDGE) {
+      return "Không kết nối được local bridge. Hãy kiểm tra mạng hoặc mở lại Stock Audit App.exe.";
     }
-    return "Không kết nối được. Hãy kiểm tra mạng hoặc mở lại Stock Audit App.exe.";
+    if (storageMode === "fs") {
+      return "Không kết nối được dịch vụ xử lý file trên Vercel. Hãy kiểm tra mạng hoặc tải lại trang.";
+    }
+    return "Không kết nối được server. Hãy kiểm tra kết nối mạng hoặc tải lại trang.";
   }
   return error.message || "Có lỗi xảy ra. Vui lòng thử lại.";
 }
@@ -153,6 +165,17 @@ function setAuthToken(token) {
 }
 
 // ===== MODE DETECTION =====
+async function fetchHealth(baseUrl, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${baseUrl}/health`, { cache: "no-store", signal: ctrl.signal });
+    return res.ok ? await res.json().catch(() => null) : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function detectStorageMode() {
   if (!IS_REMOTE_FRONTEND) {
     storageMode = "local";
@@ -160,28 +183,16 @@ async function detectStorageMode() {
     return;
   }
 
-  // Check if same-origin server has writes enabled (cloud mode)
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3000);
-    const res = await fetch(`${window.location.origin}/health`, { cache: "no-store", signal: ctrl.signal });
-    clearTimeout(timer);
-    const health = res.ok ? await res.json().catch(() => null) : null;
-    if (health?.storage?.writes_enabled) {
-      storageMode = "cloud";
-      API_BASE = "";
-      return;
-    }
-  } catch {}
+  if (!USE_LOCAL_BRIDGE) {
+    storageMode = "cloud";
+    API_BASE = "";
+    return;
+  }
 
   // Try local bridge if explicitly requested via ?bridge=1
   if (USE_LOCAL_BRIDGE) {
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 2000);
-      const res = await fetch(`${LOCAL_BRIDGE_URL}/health`, { cache: "no-store", signal: ctrl.signal });
-      clearTimeout(timer);
-      const health = res.ok ? await res.json().catch(() => null) : null;
+      const health = await fetchHealth(LOCAL_BRIDGE_URL, BRIDGE_DETECTION_TIMEOUT_MS);
       if (health?.local_bridge && health?.storage?.writes_enabled) {
         storageMode = "bridge";
         API_BASE = LOCAL_BRIDGE_URL;
@@ -328,7 +339,7 @@ async function fsLogin(username, password) {
   const user = users.find(u => (u.username || "").toLowerCase() === username.trim().toLowerCase());
   if (!user) throw new Error("Tên đăng nhập không tồn tại.");
   if ((user.is_active || "").toUpperCase() === "FALSE") throw new Error("Tài khoản đã bị khóa.");
-  if (user.role === "admin") throw new Error("Admin phải đăng nhập qua máy cài Stock Audit App.exe.");
+  const role = String(user.role || "user").trim().toLowerCase() === "admin" ? "admin" : "user";
   setStatus(authStatus, "Đang xác thực (có thể mất vài giây)...");
   const hash = String(user.password_hash || "").trim();
   const temporaryPassword = String(user.password || "");
@@ -341,7 +352,7 @@ async function fsLogin(username, password) {
     throw new Error("Tài khoản chưa được cấp mật khẩu. Hãy điền cột password hoặc password_hash trên Google Sheet.");
   }
   if (!valid) throw new Error("Mật khẩu không đúng.");
-  return { username: user.username, display_name: user.display_name || user.username, role: "user", is_admin: false };
+  return { username: user.username, display_name: user.display_name || user.username, role, is_admin: role === "admin" };
 }
 
 // ===== FS BUSINESS LOGIC =====
@@ -556,9 +567,9 @@ function fsScan(data, barcode, quantity = 1) {
   const now = new Date().toISOString().replace("T", " ").substring(0, 19);
   data.scan_events = data.scan_events || [];
   if (!item) {
-    const note = `Không khớp file tồn theo màu ${parsed.color_code}, size ${parsed.size_code}, tác nghiệp ${parsed.operation_key}`;
+    const note = `CẢNH BÁO: Mã scan không có trong file tồn đã import. Kiểm tra lại hàng hoặc mã vạch: màu ${parsed.color_code}, size ${parsed.size_code}, tác nghiệp ${parsed.operation_key}.`;
     data.scan_events.push({ scan_code: parsed.raw_code, color_code: parsed.color_code, size_code: parsed.size_code, operation_code: parsed.operation_code, operation_key: parsed.operation_key, quantity, status: "unmatched", note, created_at: now });
-    return { matched: false, message: note, scan_parts: parsed };
+    return { matched: false, severity: "wrong_item", message: note, scan_parts: parsed };
   }
   item.scanned_qty = (item.scanned_qty || 0) + quantity;
   item.last_scanned_at = now;
@@ -694,11 +705,15 @@ function showAuthMode(mode, message = "") {
   if (storageMode === "fs") {
     authCaption.textContent = "Đăng nhập để dùng app. Sau khi đăng nhập bạn sẽ kết nối thư mục lưu dữ liệu.";
   } else if (mode === "setup") {
-    authCaption.textContent = "Tạo tài khoản admin trên máy local đang kết nối. Dữ liệu được lưu trong thư mục local của máy này.";
+    authCaption.textContent = storageMode === "cloud"
+      ? "Tạo tài khoản admin đầu tiên trên bản web. Dữ liệu được lưu trên server cloud của app."
+      : "Tạo tài khoản admin trên máy local đang kết nối. Dữ liệu được lưu trong thư mục local của máy này.";
+  } else if (storageMode === "cloud") {
+    authCaption.textContent = "Đăng nhập để mở dữ liệu kiểm hàng trên server cloud của app.";
+  } else if (storageMode === "bridge") {
+    authCaption.textContent = "Đang dùng local bridge trên máy này để mở dữ liệu kiểm hàng.";
   } else {
-    authCaption.textContent = IS_REMOTE_FRONTEND
-      ? "Trang Vercel chỉ chạy giao diện. Hãy mở Stock Audit App.exe trên máy này để kết nối thư mục dữ liệu local."
-      : "Đăng nhập để mở dữ liệu kiểm hàng của tài khoản này.";
+    authCaption.textContent = "Đăng nhập để mở dữ liệu kiểm hàng của tài khoản này.";
   }
   setStatus(authStatus, message);
   const firstInput = mode === "setup"
@@ -712,13 +727,17 @@ async function showApp(user) {
   hideAllViews();
   appView.classList.remove("hidden");
   userLabel.textContent = `${user.display_name || user.username} (${user.role})`;
-  adminToggle.classList.toggle("hidden", !user.is_admin);
+  const canManageUsers = Boolean(user.is_admin && storageMode !== "fs");
+  adminToggle.classList.toggle("hidden", !canManageUsers);
+  adminToggle.setAttribute("aria-expanded", "false");
   adminPanel.classList.add("hidden");
   if (storageMode === "fs" && dirHandle) {
     folderLabel.textContent = `📁 ${dirHandle.name}`;
     folderLabel.classList.remove("hidden");
+    changeFolderButton?.classList.remove("hidden");
   } else {
     folderLabel.classList.add("hidden");
+    changeFolderButton?.classList.add("hidden");
   }
   if (storageMode === "fs") {
     const data = await readFSData(user.username);
@@ -727,7 +746,6 @@ async function showApp(user) {
     renderDashboard(buildDashboard(fsData));
   } else {
     await loadCurrentSession();
-    if (user.is_admin) await loadUsers();
   }
   barcodeInput.focus();
 }
@@ -775,6 +793,11 @@ async function checkAuthStatus() {
   }
 
   // cloud / bridge / local — all use the server API
+  if (storageMode === "cloud" && !authToken) {
+    showAuthMode("login");
+    return;
+  }
+
   try {
     const data = await apiJson("/api/auth/status");
     if (data.desktop_required) {
@@ -790,10 +813,10 @@ async function checkAuthStatus() {
     await showApp(data.user);
   } catch (error) {
     if (storageMode === "cloud") {
-      showAuthMode("login", "Không kết nối được server. Hãy kiểm tra kết nối mạng.");
+      showAuthMode("login", "Không kết nối được server. Hãy kiểm tra kết nối mạng hoặc tải lại trang.");
       return;
     }
-    if (IS_REMOTE_FRONTEND && error instanceof TypeError) {
+    if (USE_LOCAL_BRIDGE && error instanceof TypeError) {
       showBridgeRequired();
       return;
     }
@@ -924,7 +947,9 @@ function renderDiscrepancySummary(items) {
   const shortQty = shortItems.reduce((t, i) => t + Math.abs(i.difference), 0);
   const overQty = overItems.reduce((t, i) => t + i.difference, 0);
 
-  if (discrepancyMode !== "compact" && overItems.length > 0) {
+  if (!excessAlert) {
+    // Older embedded HTML may not have the excess alert container.
+  } else if (discrepancyMode !== "compact" && overItems.length > 0) {
     excessAlert.classList.remove("hidden");
     excessAlert.innerHTML = `
       <strong>⚠ Phát hiện ${overItems.length} dòng dư với tổng ${numberFormat(overQty)} sản phẩm dư</strong>
@@ -1034,11 +1059,43 @@ function renderSession(session) {
 }
 
 function renderDashboard(data) {
+  lastDashboard = data;
   renderSession(data.session || null);
   renderStats(data.summary || null);
   renderItems(data.items || [], searchQuery);
   renderDiscrepancies(data.discrepancies || []);
   renderUnmatched(data.recent_scans || [], searchQuery);
+}
+
+function applyScanPatch(data) {
+  if (!lastDashboard) return false;
+  if (data.session) lastDashboard.session = data.session;
+  if (data.summary) lastDashboard.summary = data.summary;
+
+  if (data.matched && data.item) {
+    const items = lastDashboard.items || [];
+    const idx = items.findIndex(i => i.id === data.item.id);
+    if (idx >= 0) items[idx] = data.item;
+    else items.push(data.item);
+    lastDashboard.items = items;
+    lastDashboard.discrepancies = items.filter(i => (i.difference || 0) !== 0 || i.reason_code);
+  }
+
+  if (data.scan_event) {
+    const recent = [data.scan_event, ...(lastDashboard.recent_scans || [])].slice(0, 20);
+    lastDashboard.recent_scans = recent;
+    if (data.scan_event.status === "unmatched") {
+      const unmatched = [data.scan_event, ...(lastDashboard.unmatched_scans || [])].slice(0, 20);
+      lastDashboard.unmatched_scans = unmatched;
+    }
+  }
+
+  renderSession(lastDashboard.session || null);
+  renderStats(lastDashboard.summary || null);
+  renderItems(lastDashboard.items || [], searchQuery);
+  renderDiscrepancies(lastDashboard.discrepancies || []);
+  renderUnmatched(lastDashboard.recent_scans || [], searchQuery);
+  return true;
 }
 
 async function loadCurrentSession() {
@@ -1053,19 +1110,51 @@ async function loadCurrentSession() {
   renderDashboard(data);
 }
 
+function renderUserAudit(user) {
+  const audit = user.login_audit || {};
+  const activeIps = Array.isArray(audit.active_ips) ? audit.active_ips : [];
+  const activeIpText = activeIps.length ? activeIps.join(", ") : "Không có phiên đang mở";
+  const activeIpCount = Number(audit.active_ip_count || activeIps.length || 0);
+  const lastIp = user.last_login_ip || audit.last_session_ip || "Chưa ghi nhận";
+  const lastDevice = shortenUserAgent(user.last_login_user_agent || audit.last_session_user_agent || "");
+  const lastAt = user.last_login_at || audit.last_session_at || "Chưa ghi nhận";
+  return `
+    <div class="user-audit">
+      <span class="user-audit-line">Đăng nhập gần nhất: ${escapeHtml(lastAt)}</span>
+      <span class="user-audit-line">IP gần nhất: ${escapeHtml(lastIp)}</span>
+      <span class="user-audit-line">Thiết bị: ${escapeHtml(lastDevice)}</span>
+      <span class="user-audit-line ${activeIpCount > 1 ? "audit-warning" : ""}">
+        IP đang dùng: ${escapeHtml(activeIpText)}
+        ${activeIpCount > 1 ? `<strong class="risk-badge">Nghi cho mượn nick</strong>` : ""}
+      </span>
+    </div>
+  `;
+}
+
 async function loadUsers() {
   if (!currentUser?.is_admin) return;
+  if (storageMode === "fs") {
+    if (accountSheetPath) {
+      accountSheetPath.textContent = "Bản web đang đăng nhập bằng Google Sheet. Hãy quản lý tài khoản trực tiếp trên Google Sheet.";
+    }
+    userList.innerHTML = "";
+    return;
+  }
   try {
     const data = await apiJson("/api/users");
     if (accountSheetPath) {
       accountSheetPath.textContent = data.account_sheet_path ? `Sheet tài khoản: ${data.account_sheet_path}` : "";
     }
-    userList.innerHTML = (data.users || []).map(user => `
-      <div class="user-row ${user.is_active ? "" : "user-row-inactive"}">
+    userList.innerHTML = (data.users || []).map(user => {
+      const audit = user.login_audit || {};
+      const activeIpCount = Number(audit.active_ip_count || 0);
+      return `
+      <div class="user-row ${user.is_active ? "" : "user-row-inactive"} ${activeIpCount > 1 ? "user-risk" : ""}">
         <div class="user-main">
           <strong>${escapeHtml(user.display_name || user.username)}</strong><br />
           <span>${escapeHtml(user.username)} | ${escapeHtml(user.role)} | ${user.is_active ? "Đang dùng" : "Đã khóa"}</span><br />
           <span>DB riêng: ${escapeHtml(user.data_path || "")}</span>
+          ${renderUserAudit(user)}
         </div>
         <div class="user-actions">
           <input class="user-password-input" type="password" data-password-user="${user.id}" autocomplete="new-password" placeholder="Mật khẩu mới" minlength="8" />
@@ -1078,7 +1167,8 @@ async function loadUsers() {
           </button>
         </div>
       </div>
-    `).join("");
+    `;
+    }).join("");
   } catch (error) {
     setStatus(adminStatus, getErrorMessage(error), "error");
   }
@@ -1102,6 +1192,22 @@ pickFolderBtn.addEventListener("click", async () => {
     } else {
       setStatus(folderStatus, getErrorMessage(error), "error");
     }
+  }
+});
+
+changeFolderButton?.addEventListener("click", async () => {
+  if (!fsModeSupported()) return;
+  try {
+    setStatus(scanStatus, "Đang mở hộp chọn thư mục...");
+    await pickFolder();
+    if (currentUser) await showApp(currentUser);
+    setStatus(scanStatus, "Đã đổi thư mục dữ liệu.", "success");
+  } catch (error) {
+    setStatus(
+      scanStatus,
+      error.name === "AbortError" ? "Chưa chọn thư mục." : getErrorMessage(error),
+      "error",
+    );
   }
 });
 
@@ -1185,7 +1291,10 @@ logoutButton.addEventListener("click", async () => {
 
 adminToggle.addEventListener("click", async () => {
   adminPanel.classList.toggle("hidden");
-  if (!adminPanel.classList.contains("hidden")) await loadUsers();
+  const isOpen = !adminPanel.classList.contains("hidden");
+  adminToggle.setAttribute("aria-expanded", String(isOpen));
+  adminToggle.classList.toggle("btn-primary", isOpen);
+  if (isOpen) await loadUsers();
 });
 
 createUserForm.addEventListener("submit", async (event) => {
@@ -1367,12 +1476,16 @@ async function submitScan(barcode) {
 
   setStatus(scanStatus, "Đang ghi nhận scan...");
   try {
-    const response = await apiFetch("/api/scan", { method: "POST", body: JSON.stringify({ barcode, quantity: 1 }) });
+    const response = await apiFetch("/api/scan?compact=1", { method: "POST", body: JSON.stringify({ barcode, quantity: 1 }) });
     const data = await readResponsePayload(response);
     if (!response.ok) throw new Error(data.detail || "Không ghi nhận được scan");
     discrepancyMode = "compact";
     setStatus(scanStatus, data.message, data.matched ? "success" : "error");
-    renderDashboard(data);
+    if (data.compact && lastDashboard) {
+      applyScanPatch(data);
+    } else {
+      renderDashboard(data);
+    }
     barcodeInput.value = "";
     barcodeInput.focus();
     return true;
